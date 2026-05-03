@@ -1,0 +1,271 @@
+\documentclass[10pt,twocolumn]{article}
+
+% ============================================================================
+% PACKAGES
+% ============================================================================
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{times}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage[margin=1in]{geometry}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{url}
+
+% ============================================================================
+% DOCUMENT SETTINGS
+% ============================================================================
+\setlength{\parindent}{1em}
+\setlength{\parskip}{0pt}
+\linespread{1.1}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+% ============================================================================
+% TITLE
+% ============================================================================
+\title{\Large\textbf{Transfer Learning vs.\ Fine-Tuning on MRNet: \\
+Multi-Task Knee MRI Classification with ResNet-18}}
+
+\author{
+Nicholas Hefner \\
+\textit{Department of Computer Engineering and Computer Science} \\
+\textit{California State University, Long Beach} \\
+\texttt{nicholas.hefner@student.csulb.edu}
+}
+
+\date{}
+
+% ============================================================================
+% DOCUMENT BEGIN
+% ============================================================================
+\begin{document}
+
+\maketitle
+
+% ============================================================================
+% ABSTRACT
+% ============================================================================
+\begin{abstract}
+Medical image classification often begins with models pretrained on natural images, then adapts them to domain-specific data. This report describes an experiment on the Stanford MRNet knee MRI dataset~\cite{bien2020deep,stanford_mrnet}: three binary tasks (abnormality, ACL tear, meniscal tear) using a three-branch ResNet-18 architecture with ImageNet-pretrained weights. I compare \textbf{fine-tuning} (backbone frozen for an initial epoch, then unfrozen) against \textbf{transfer-only} training (backbone frozen for all epochs; only task heads train). Both strategies use the same hyperparameters, optimizer, and data pipeline implemented in a PyTorch notebook. On the official validation split, fine-tuning achieves substantially higher validation AUC on every task; the mean validation AUC across tasks is approximately \textbf{0.861} versus \textbf{0.628} for transfer-only, a gap of about \textbf{0.23}. I discuss interpretation (task difficulty, capacity, and overfitting risk) and note limitations: results depend on a single experimental configuration and held-out validation only, not the MRNet hidden test set.
+\end{abstract}
+
+% ============================================================================
+% SECTION 1: INTRODUCTION
+% ============================================================================
+\section{Introduction}
+\label{sec:introduction}
+
+Knee MRI interpretation is time-consuming and variable across readers. Machine learning systems can assist by scoring exams for common pathology labels. Public datasets such as MRNet~\cite{bien2020deep} enable reproducible benchmarking. A practical question is how aggressively to adapt a pretrained convolutional backbone: training only lightweight heads (\textbf{linear probing} / transfer-only) is fast and stabilizes optimization, whereas \textbf{fine-tuning} updates backbone weights to align features with MRI appearance.
+
+In this coursework experiment, I ask:
+\begin{itemize}[noitemsep,topsep=0pt]
+    \item How much validation AUC improves when ResNet-18 backbones are fine-tuned vs.\ kept frozen for all epochs?
+    \item Whether gains are uniform across MRNet tasks (abnormal, ACL, meniscus).
+\end{itemize}
+
+\subsection{Contributions}
+
+\begin{enumerate}[noitemsep,topsep=0pt]
+    \item A clear side-by-side protocol: identical data, preprocessing, architecture, epochs, optimizer, and batch size---only backbone training policy differs after initialization.
+    \item Quantitative comparison on MRNet validation AUC per task plus mean AUC across tasks.
+    \item Reproducible PyTorch notebook pipeline (training curves, ROC on validation checkpoints, head-to-head bar chart).
+\end{enumerate}
+
+\textbf{Paper organization.}
+Section~\ref{sec:background} summarizes MRNet and transfer learning.
+Section~\ref{sec:methodology} describes architecture, training strategies, and metrics.
+Section~\ref{sec:results} reports validation AUCs and discussion.
+Section~\ref{sec:related} highlights related literature.
+Section~\ref{sec:conclusion} concludes.
+
+% ============================================================================
+% SECTION 2: BACKGROUND
+% ============================================================================
+\section{Background}
+\label{sec:background}
+
+\subsection{MRNet Dataset}
+
+Stanford MRNet provides knee MRI exams with labels for multiple binary diagnoses. In the notebook configuration, splits are summarized as roughly $1{,}130$ training, $120$ validation, and $120$ hidden test cases; volumes are organized in three planes (\textbf{axial}, \textbf{coronal}, \textbf{sagittal}) as numeric arrays~\cite{bien2020deep, stanford_mrnet}.
+
+\subsection{Transfer Learning and Fine-Tuning}
+
+\textbf{Transfer learning} initializes a network with weights trained on another domain (here, ImageNet) and adjusts parameters on medical data~\cite{deng2009imagenet, he2016deep}.
+
+\textbf{Transfer-only} freezes early feature extractors and trains only the task-specific head(s), limiting capacity to adapt low-level patterns.
+
+\textbf{Fine-tuning} allows gradient updates to propagate into the backbone, often improving performance when the target domain differs from pretraining, at the cost of more parameters to fit and higher overfitting risk on small datasets.
+
+\subsection{Metrics}
+
+For each binary task, I report \textbf{validation AUC} (area under the ROC curve) using scikit-learn, consistent with ranking-based evaluation on imbalanced medical labels. The competition-style summary uses the \textbf{mean} of the three task AUCs~\cite{bien2020deep}.
+
+% ============================================================================
+% SECTION 3: METHODOLOGY
+% ============================================================================
+\section{Methodology}
+\label{sec:methodology}
+
+\subsection{Model Architecture}
+
+I use an \textbf{MRNet}-style ensemble: three independent ResNet-18 backbones~\cite{he2016deep,torchvision} (one per plane), each pretrained on ImageNet via torchvision, followed by fusion and a single linear scalar logit per task~(binary classification with sigmoid/BCE logits). Implementations reside in \texttt{notebooks/mrnet\_training.ipynb}.
+
+\subsection{Training Strategies}
+
+I train \textbf{one model per task} (three separate runs each for fine-tuning and transfer-only), holding architecture and optimizer fixed.
+
+\subsubsection{Fine-tuning}
+\begin{itemize}[noitemsep,topsep=0pt]
+    \item Backbone parameters are \textbf{frozen for the first epoch} (\texttt{FREEZE\_BACKBONE\_EPOCHS}${}=1$ in the notebook: epoch index $0$).
+    \item From epoch two onward, backbones are \textbf{unfrozen}; the optimizer is re-instantiated over all parameters (same learning rate as before unfreezing in the reference run).
+\end{itemize}
+
+\subsubsection{Transfer-only (frozen backbone)}
+\begin{itemize}[noitemsep,topsep=0pt]
+    \item Backbones remain frozen for \textbf{all} training epochs; only the trainable head parameters update.
+\end{itemize}
+
+\subsection{Optimization and Hyperparameters}
+
+Unless otherwise changed in the configuration cell, the notebook uses:
+\begin{itemize}[noitemsep,topsep=0pt]
+    \item Optimizer: \textbf{Adam}, learning rate $10^{-4}$, weight decay $0$
+    \item Loss: \textbf{BCEWithLogitsLoss}
+    \item Epochs: $20$ per task
+    \item Batch size: $1$ (variable-sized volumes; custom \texttt{collate})
+    \item Input resize: $224\times 224$ per slice channel input to ResNet
+    \item Data augmentation: enabled on training; disabled on validation
+    \item \texttt{NUM\_SLICE\_SAMPLE}: \texttt{None} (use all slices as implemented)
+\end{itemize}
+
+Training uses PyTorch~$\geq$2.0 and scikit-learn for AUC/ROC~\cite{requirements}.
+
+\subsection{Checkpoints and Logging}
+
+Fine-tuning saves \texttt{mrnet\_\{task\}\_best.pt} and \texttt{section5\_training\_history.json}. Transfer-only saves \texttt{mrnet\_\{task\}\_transfer\_only\_best.pt} and \texttt{section5\_transfer\_only\_history.json}. The best epoch is selected by \textbf{maximum validation AUC} per task.
+
+\subsection{Evaluation}
+
+Primary numbers are \textbf{best validation AUC} from training histories. Secondary analysis includes per-epoch loss/AUC plots and ROC curves loaded from the best checkpoint per task (notebook Section~5b and~5e). I do \textbf{not} report hidden test accuracy (test labels not used in the notebook pipeline).
+
+% ============================================================================
+% SECTION 4: RESULTS
+% ============================================================================
+\section{Experimental Results}
+\label{sec:results}
+
+\subsection{Validation AUC Summary}
+
+Table~\ref{tab:auc} compares best validation AUC. Numbers are taken from the head-to-head summary produced in the notebook after both training runs (fine-tuning vs.\ transfer-only); \textbf{your run may differ} if hyperparameters or random seed change.
+
+\begin{table}[H]
+\centering
+\caption{Best validation AUC by task (MRNet valid split).}
+\label{tab:auc}
+\small
+\begin{tabular}{lccc}
+\toprule
+\textbf{Task} & \textbf{Fine-tuning} & \textbf{Transfer-only} & \textbf{$\Delta$ (FT$-$TO)} \\
+\midrule
+Abnormal  & 0.870 & 0.654 & +0.216 \\
+ACL       & 0.933 & 0.600 & +0.333 \\
+Meniscus  & 0.779 & 0.629 & +0.150 \\
+\midrule
+\textbf{Mean} & \textbf{0.861} & \textbf{0.628} & \textbf{+0.233} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Discussion}
+
+\paragraph{Consistent benefit of fine-tuning.}
+Fine-tuning improves every task, and the mean AUC gap ($\approx 0.23$) indicates the effect is not explained by a single outlier task.
+
+\paragraph{Task-dependent margin.}
+The largest improvement appears on \textbf{ACL}, suggesting frozen mid-level ImageNet features are least aligned with the cues needed for that label, or that the ACL decision boundary is harder to approximate with a shallow head alone. \textbf{Meniscus} shows the smallest gap, compatible with pretrained features retaining more transferable structure for that task---but this remains a hypothesis without layer-wise probing.
+
+\paragraph{Overfitting and optimization.}
+MRI datasets are moderately sized versus model capacity when the full backbone trains. Validation AUC that \textbf{rises early then drifts downward} while training loss continues to drop is compatible with increasing train-set specialization; I recommend reporting train/validation curves side-by-side where space permits.
+
+\paragraph{Limitations.}
+Single configuration; batch size one yields noisy gradients; no ensembling across seeds; evaluation is validation-only; class imbalance across tasks affects AUC variance.
+
+% ============================================================================
+% SECTION 5: RELATED WORK
+% ============================================================================
+\section{Related Work}
+\label{sec:related}
+
+Deep learning on MRNet~\cite{bien2020deep} established strong baselines for knee MRI classification. Subsequent work explores architecture variants, ensembles, and self-supervised pretraining---outside the scope of this short report.
+
+Transfer learning from ImageNet to medical imaging is standard~\cite{deng2009imagenet, he2016deep}: natural-image pretraining often helps low-data regimes despite domain gap, especially when coupled with careful fine-tuning (learning rate freezes, discriminative LR schedules). This experiment isolates only the \textit{freeze entire training} vs.\ \textit{unfreeze after one epoch} axis under a minimal production-style training loop implemented for CECS~553.
+
+% ============================================================================
+% SECTION 6: CONCLUSION
+% ============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+I compared frozen-backbone vs.\ backbone fine-tuning for three MRNet detection tasks using a triple ResNet-18 architecture and matched training pipelines. Fine-tuning produced higher validation AUC on all tasks with a mean AUC improvement of roughly $0.23$ in the documented run---strong evidence that, under this setup, adapting pretrained convolutional weights outperforms head-only adaptation.
+
+\textbf{Future work:} discriminative layer-wise learning rates; longer freezes; stochastic depth or stronger augmentation; repeating runs across seeds for confidence intervals; optional evaluation on MRNet competition test submissions if permitted.
+
+\subsection{Reproducibility}
+
+Code and checkpoints follow the notebook in \texttt{notebooks/mrnet\_training.ipynb}; dependencies are listed in \texttt{requirements.txt}. MRNet data require separate registration and download from Stanford AIMI.
+
+% ============================================================================
+% REFERENCES
+% ============================================================================
+\bibliographystyle{plain}
+\begin{thebibliography}{99}
+
+\bibitem{bien2020deep}
+Nicholas Bien, Pranav Rajpurkar, Robyn L.\ Ball, et al.
+\newblock Deep-learning-assisted diagnosis for knee magnetic resonance imaging.
+\newblock \emph{Radiology: Artificial Intelligence}, 2(1):e190093, 2020.
+\newblock (MRNet-style knee MRI classification; see also official dataset documentation.)
+
+\bibitem{stanford_mrnet}
+Stanford AIMI.
+\newblock MRNet: Knee MRIs dataset and competition resources.
+\newblock \url{https://aimi.stanford.edu/datasets/mrnet-knee-mris}
+\newblock (accessed 2026).
+
+\bibitem{he2016deep}
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+\newblock Deep residual learning for image recognition.
+\newblock In \emph{Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR)}, pages 770--778, 2016.
+
+\bibitem{deng2009imagenet}
+Jia Deng, Wei Dong, Richard Socher, Li-Jia Li, Kai Li, and Li Fei-Fei.
+\newblock ImageNet: A large-scale hierarchical image database.
+\newblock In \emph{Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR)}, pages 248--255, 2009.
+
+\bibitem{torchvision}
+PyTorch maintainers.
+\newblock Torchvision model zoo (ResNet-18 ImageNet weights).
+\newblock \url{https://pytorch.org/vision/stable/models.html}
+
+\bibitem{requirements}
+Project \texttt{requirements.txt}: PyTorch, torchvision, NumPy, pandas, scikit-learn, tqdm, matplotlib.
+\newblock \texttt{github.com} student project repository (CECS 553), 2026.
+
+\end{thebibliography}
+
+\end{document}
